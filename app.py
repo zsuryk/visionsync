@@ -210,6 +210,86 @@ def validate_extraction(data):
         warnings.append(("warning", f"Unrecognised currency code: {data['currency']}"))
     return warnings
 
+# ── Duplicate Detection ──
+
+def find_duplicates(new_data, existing_df):
+    candidates = []
+    for _, row in existing_df.iterrows():
+        vendor_score = fuzz.partial_ratio(
+            str(new_data.get("vendor_name", "")).lower(),
+            str(row.get("vendor_name", "")).lower()
+        )
+        try:
+            new_amt = float(new_data.get("gross_amount", 0))
+            existing_amt = float(row.get("gross_amount", 0))
+            max_amt = max(abs(new_amt), abs(existing_amt))
+            amount_score = max(0, 100 * (1 - abs(new_amt - existing_amt) / max_amt)) if max_amt > 0 else 100
+        except (ValueError, TypeError):
+            amount_score = 0
+        try:
+            new_dt = datetime.strptime(str(new_data.get("transaction_date", "")), "%Y-%m-%d")
+            existing_dt = datetime.strptime(str(row.get("transaction_date", "")), "%Y-%m-%d")
+            diff_days = abs((new_dt - existing_dt).days)
+            date_score = 100 if diff_days == 0 else 80 if diff_days <= 7 else 50 if diff_days <= 30 else 0
+        except (ValueError, TypeError):
+            date_score = 0
+        currency_score = 100 if str(new_data.get("currency", "")).upper() == str(row.get("currency", "")).upper() else 0
+        category_score = fuzz.partial_ratio(
+            str(new_data.get("ledger_category", "")).lower(),
+            str(row.get("ledger_category", "")).lower()
+        )
+        composite = (
+            vendor_score * 0.30 + amount_score * 0.30 +
+            date_score * 0.20 + currency_score * 0.10 + category_score * 0.10
+        )
+        if composite >= 60:
+            c = row.to_dict()
+            c["_score"] = round(composite, 1)
+            candidates.append(c)
+    candidates.sort(key=lambda c: c["_score"], reverse=True)
+    return candidates[:5]
+
+@st.dialog("Potential Duplicate Detected", width="large")
+def show_dup_dialog(candidate, idx, total, new_image_b64, new_image_format):
+    def decision_row():
+        col_a, col_b = st.columns(2)
+        with col_a:
+            if st.button("🗑  Discard Upload", type="primary", use_container_width=True):
+                dup = st.session_state.get("dup_review")
+                if dup:
+                    dup["decisions"].append("discard")
+                    dup["pending"].pop(0)
+                    st.rerun()
+        with col_b:
+            if st.button("→  Continue Upload", use_container_width=True):
+                dup = st.session_state.get("dup_review")
+                if dup:
+                    dup["decisions"].append("continue")
+                    dup["pending"].pop(0)
+                    st.rerun()
+
+    def show_data(data_dict):
+        st.json({k: v for k, v in data_dict.items() if k in ("vendor_name", "transaction_date", "gross_amount", "currency", "ledger_category")})
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.caption("**New Upload**")
+        try:
+            st.image(base64.b64decode(new_image_b64), use_container_width=True)
+        except Exception:
+            st.caption("Image unavailable")
+        show_data(st.session_state.get("dup_review", {}).get("new_data", {}))
+    with col2:
+        st.caption(f"**Existing Entry** ({candidate['id'][:8]}...)")
+        try:
+            st.image(base64.b64decode(candidate["file_path"]), use_container_width=True)
+        except Exception:
+            st.caption("Image unavailable")
+        show_data(candidate)
+    st.metric("Similarity Score", f"{candidate['_score']:.0f}%")
+    st.caption(f"*Candidate {idx} of {total}*")
+    decision_row()
+
 # ── Bootstrap Database ──
 
 if "db_inited" not in st.session_state:
@@ -249,41 +329,55 @@ with st.sidebar:
         label_visibility="collapsed", key=upload_key, accept_multiple_files=True
     )
 
-    if uploaded_files:
-        new_files = [
-            f for f in uploaded_files
-            if f"{f.name}_{f.size}" not in st.session_state.get("processed_keys", set())
-        ]
+    if uploaded_files and "dup_review" not in st.session_state:
+        processed_keys = st.session_state.setdefault("processed_keys", set())
+        discarded_keys = st.session_state.setdefault("discarded_keys", set())
 
-        if new_files:
-            st.session_state.setdefault("processed_keys", set())
-            st.session_state.pop("last_warnings", None)
-            all_warnings = []
-            last_entry_id = None
-            success_count = 0
+        new_file = None
+        for f in uploaded_files:
+            fk = f"{f.name}_{f.size}"
+            if fk not in processed_keys and fk not in discarded_keys:
+                new_file = f
+                break
 
-            for f in new_files:
-                file_key = f"{f.name}_{f.size}"
-                raw_bytes = f.getvalue()
-                is_pdf = f.name.lower().endswith(".pdf")
+        if new_file:
+            file_key = f"{new_file.name}_{new_file.size}"
+            raw_bytes = new_file.getvalue()
+            is_pdf = new_file.name.lower().endswith(".pdf")
 
-                if is_pdf:
-                    pages = pdf_to_images(raw_bytes)
-                    st.session_state["current_pdf_pages"] = pages
-                    b64_image = encode_image(pages[0])
-                    img_format = "png"
+            if is_pdf:
+                pages = pdf_to_images(raw_bytes)
+                b64_image = encode_image(pages[0])
+                img_format = "png"
+            else:
+                b64_image = encode_image(raw_bytes)
+                img_format = "jpeg"
+
+            with st.spinner(f"Extracting {new_file.name}..."):
+                result = call_llm(b64_image, img_format)
+
+            if result:
+                f_warnings = validate_extraction(result)
+                for severity, msg in f_warnings:
+                    getattr(st, severity)(f"{new_file.name}: {msg}")
+                st.session_state["last_warnings"] = f_warnings
+
+                existing_df = load_entries(include_deleted=False)
+                dups = find_duplicates(result, existing_df)
+
+                if dups:
+                    st.session_state["dup_review"] = {
+                        "pending": dups,
+                        "new_data": result,
+                        "new_image_b64": b64_image,
+                        "new_image_format": img_format,
+                        "is_pdf": is_pdf,
+                        "pdf_pages": pages if is_pdf else None,
+                        "decisions": [],
+                        "file_key": file_key,
+                    }
+                    st.rerun()
                 else:
-                    b64_image = encode_image(raw_bytes)
-                    img_format = "jpeg"
-
-                with st.spinner(f"Extracting {f.name}..."):
-                    result = call_llm(b64_image, img_format)
-                if result:
-                    f_warnings = validate_extraction(result)
-                    for severity, msg in f_warnings:
-                        getattr(st, severity)(f"{f.name}: {msg}")
-                    all_warnings.extend(f_warnings)
-
                     entry_id = insert_entry(
                         file_path=b64_image,
                         vendor_name=result.get("vendor_name", ""),
@@ -294,19 +388,51 @@ with st.sidebar:
                     )
                     if is_pdf:
                         st.session_state.setdefault("pdf_pages", {})[entry_id] = pages
-                    st.session_state["processed_keys"].add(file_key)
-                    last_entry_id = entry_id
-                    success_count += 1
-
-            if all_warnings:
-                st.session_state["last_warnings"] = all_warnings
-            if last_entry_id:
-                st.session_state["last_entry_id"] = last_entry_id
-                st.session_state["select_last_entry"] = True
-
+                    processed_keys.add(file_key)
+                    st.session_state["last_entry_id"] = entry_id
+                    st.session_state["select_last_entry"] = True
+                    st.rerun()
+            else:
+                discarded_keys.add(file_key)
+                st.rerun()
+        else:
+            success_count = len(processed_keys)
+            processed_keys.clear()
+            discarded_keys.clear()
             st.session_state["upload_counter"] = st.session_state.get("upload_counter", 0) + 1
-            st.success(f"{success_count} entries extracted and saved to ledger!")
+            if success_count:
+                st.toast(f"{success_count} entries extracted and saved to ledger!")
             st.rerun()
+
+# ── Duplicate Resolution ──
+
+dup = st.session_state.get("dup_review")
+if dup:
+    if dup["pending"]:
+        idx = len(dup["decisions"]) + 1
+        total = len(dup["pending"]) + len(dup["decisions"])
+        show_dup_dialog(dup["pending"][0], idx, total, dup["new_image_b64"], dup["new_image_format"])
+    else:
+        if any(d == "continue" for d in dup["decisions"]):
+            data = dup["new_data"]
+            entry_id = insert_entry(
+                file_path=dup["new_image_b64"],
+                vendor_name=data.get("vendor_name", ""),
+                transaction_date=data.get("transaction_date", ""),
+                gross_amount=data.get("gross_amount", 0.0),
+                currency=data.get("currency", ""),
+                ledger_category=data.get("ledger_category", "")
+            )
+            if dup.get("is_pdf") and dup.get("pdf_pages"):
+                st.session_state.setdefault("pdf_pages", {})[entry_id] = dup["pdf_pages"]
+            st.session_state["processed_keys"].add(dup["file_key"])
+            st.session_state["last_entry_id"] = entry_id
+            st.session_state["select_last_entry"] = True
+        else:
+            st.session_state["discarded_keys"].add(dup["file_key"])
+        st.session_state.pop("dup_review")
+        st.rerun()
+    st.stop()
 
 # ── Fuzzy Search & Split-Screen Layout ──
 

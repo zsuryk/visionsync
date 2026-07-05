@@ -56,9 +56,28 @@ The system must automatically initialize `db.sqlite` on startup if it does not e
 ### 5.2. Multi-File Upload
 
 * The sidebar file uploader uses `accept_multiple_files=True` to allow batch uploads of images and PDFs.
-* Duplicate detection: `st.session_state["processed_keys"]` (a `set` of `"{name}_{size}"` strings) prevents re-processing the same file across reruns.
-* Each file in the batch is processed sequentially in a `for` loop; failed files (LLM returns `None`) are skipped silently.
+* Files are processed **one at a time per rerun** to allow interactive duplicate review between extractions. A `processed_keys` set deduplicates by `"{name}_{size}"` within the current upload batch; a `discarded_keys` set prevents re-extracting files the user chose to reject.
+* When all files in a batch are processed/discarded, both sets are cleared and the `upload_counter` increments to reset the uploader widget.
+* `st.session_state["pending_files"]` is not used — the uploader widget retains the file list natively; the sidebar picks the first unprocessed file each rerun.
 * Warnings from all files are aggregated into `st.session_state["last_warnings"]` and displayed with a `"filename: message"` prefix.
+
+### 5.3. Content-Based Duplicate Detection
+
+* After LLM extraction, the extracted fields are compared against all non-deleted entries in the database using a weighted composite score:
+
+| Field | Weight | Comparison Method |
+|-------|--------|-----------------|
+| vendor_name | 30% | `rapidfuzz.partial_ratio` |
+| gross_amount | 30% | Numeric proximity: `1 - \|a-b\| / max(\|a\|,\|b\|)` |
+| transaction_date | 20% | Exact = 100, ±7d = 80, ±30d = 50, else 0 |
+| currency | 10% | Exact match |
+| ledger_category | 10% | `rapidfuzz.partial_ratio` |
+
+* If `composite >= 60`, the existing entry is flagged as a potential duplicate. Top 5 candidates (sorted descending by score) are stored in `st.session_state["dup_review"]`.
+* The entry is **not inserted** until the user resolves all candidates via a `@st.dialog(width="large")` modal.
+* The dialog shows side-by-side image previews (new vs. existing) with extracted JSON data.
+* Below the comparison: **🗑 Discard Upload** (rejects the new entry, adds file key to `discarded_keys`) and **→ Continue Upload** (inserts the new entry).
+* Candidates are processed sequentially — one dialog at a time. After all decisions are collected, the entry is inserted (if any "continue") or discarded (if all "discard").
 
 ### 5.5. Soft-Delete Convention
 
