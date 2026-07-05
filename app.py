@@ -7,6 +7,7 @@ import re
 import fitz
 import requests
 from rapidfuzz import fuzz
+from datetime import datetime
 import pandas as pd
 
 # ── Page Configuration ──
@@ -159,6 +160,34 @@ def call_llm(b64_image, image_format="jpeg"):
         st.error(f"API request failed: {e}")
         return None
 
+# ── Validation Layer ──
+
+KNOWN_CURRENCIES = {"HKD", "USD", "CNY", "EUR", "GBP", "SGD", "TWD", "JPY", "KRW", "MOP"}
+
+def validate_extraction(data):
+    warnings = []
+    try:
+        dt = datetime.strptime(data.get("transaction_date", ""), "%Y-%m-%d")
+        if dt > datetime.now():
+            warnings.append(("warning", f"Date {data['transaction_date']} is in the future"))
+    except (ValueError, TypeError):
+        val = data.get("transaction_date", "")
+        warnings.append(("error", f"Invalid date format: '{val}' (expected YYYY-MM-DD)"))
+    try:
+        amount = float(data.get("gross_amount", 0))
+        if amount < 0:
+            warnings.append(("error", f"Gross amount is negative: {amount}"))
+        elif amount == 0:
+            warnings.append(("warning", "Gross amount is zero"))
+    except (ValueError, TypeError):
+        warnings.append(("error", f"Non-numeric gross_amount: {data.get('gross_amount')}"))
+    for field in ("vendor_name", "currency", "ledger_category"):
+        if not data.get(field):
+            warnings.append(("warning", f"Missing required field: {field}"))
+    if data.get("currency") and data["currency"] not in KNOWN_CURRENCIES:
+        warnings.append(("warning", f"Unrecognised currency code: {data['currency']}"))
+    return warnings
+
 # ── Bootstrap Database ──
 
 if "db_inited" not in st.session_state:
@@ -196,6 +225,8 @@ if uploaded_file is not None:
         with st.spinner("Extracting ledger data via Multimodal LLM..."):
             result = call_llm(b64_image, img_format)
         if result:
+            for severity, msg in validate_extraction(result):
+                getattr(st, severity)(msg)
             entry_id = insert_entry(
                 file_path=b64_image,
                 vendor_name=result.get("vendor_name", ""),
