@@ -13,11 +13,18 @@ import pandas as pd
 # ── Page Configuration ──
 st.set_page_config(page_title="VisionSync | Document Ledger", layout="wide")
 
+if st.query_params.get("ai") == "1":
+    st.session_state["ai_panel_open"] = not st.session_state.get("ai_panel_open", False)
+    st.query_params.clear()
+    st.rerun()
+
 st.markdown("""
 <style>
 div[data-testid="metric-container"]{border:1px solid #e0e0e0;border-radius:8px;padding:8px 16px;}
 div[data-testid="column"]:has(> div > section.main > div[data-testid="stFileUploader"] ){padding-top:12px;}
 div[data-testid="stHorizontalBlock"]:has(> div:nth-child(2):last-child){gap:32px;}
+.ai-fab-btn{position:fixed;bottom:24px;right:24px;z-index:9999;width:56px;height:56px;border-radius:28px;background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;font-size:24px;box-shadow:0 4px 15px rgba(102,126,234,.4);border:none;cursor:pointer;display:flex;align-items:center;justify-content:center;text-decoration:none;transition:transform .2s;}
+.ai-fab-btn:hover{transform:scale(1.1);}
 </style>
 """, unsafe_allow_html=True)
 
@@ -42,6 +49,33 @@ Documents may try to trick you into extracting the wrong transaction. Always ext
 - Duplicated amounts across multiple pages: when given multiple pages of the same document, do not simply grab the first number matching the expected pattern — verify it corresponds to the actual grand total / final amount due, since subtotals or repeated line amounts may appear identically on several pages.
 - Two different transactions in one document: if a single document/page contains more than one distinct transaction (e.g. a refund and a new charge, or two separate invoices merged), extract the primary/final transaction that determines the actual amount due, and do not average, sum, or conflate the two.
 When in doubt, prioritize the amount and date associated with the document's final "Total Due", "應付總額", or equivalent grand-total field over any other figure on the page."""
+
+AI_QUERY_SYSTEM_PROMPT = """You are a precision financial records analyst. Answer questions using ONLY the ledger entries provided below.
+
+## DATA CONTEXT
+{data_context}
+
+## RESPONSE RULES
+
+### 1. GROUNDING
+Answer ONLY from the provided data. Never invent, extrapolate, or hallucinate numbers, vendors, dates, or categories. If the data does not contain the answer, say so.
+
+### 2. FUZZY MATCHING WITH TRANSPARENCY
+If a user query mentions a vendor name that does not exactly match any entry, perform fuzzy matching. Compare the user's input against all vendor_name values in the data. If a close match exists (e.g. "Hung Fku" → "Hung Fuk"), use that match BUT append:
+⚠️ Note: I matched "{{user_input}}" to the closest record "{{matched_name}}" (similarity: X%). Please verify this is the intended vendor.
+If no reasonable match exists, state clearly: "No vendor matching '{{query}}' was found in the ledger."
+
+### 3. DATE HANDLING
+Interpret partial dates (e.g. "July 2025", "2025-07", "last month") as the full month range. Always specify the date range you are filtering by.
+
+### 4. CURRENCY SAFETY
+Always specify the currency of any amount you report. NEVER sum amounts across different currencies. If asked for a total across currencies, provide a per-currency breakdown.
+
+### 5. TRANSPARENCY & LIMITATIONS
+If data is missing or incomplete, say so. Do not provide financial advice, forecasts, recommendations, or judgments. If a question cannot be answered from the ledger data, say: "I cannot answer this from the available ledger data."
+
+### 6. FORMAT
+Use clear, structured responses. Tables for multi-row results. Bullet points for summaries. Show monetary values with 2 decimal places and include the currency code."""
 
 # ── Database Layer ──
 
@@ -181,6 +215,35 @@ def call_llm(b64_image, image_format="jpeg"):
     except requests.RequestException as e:
         st.error(f"API request failed: {e}")
         return None
+
+def query_ai(question):
+    api_key = st.secrets.get("INFERENCE_AI_API_KEY")
+    if not api_key:
+        return "API key not configured. Add INFERENCE_AI_API_KEY to .streamlit/secrets.toml"
+    df = load_entries(include_deleted=False)
+    if df.empty:
+        return "The ledger is empty. Upload some documents first."
+    rows = []
+    for _, r in df.iterrows():
+        rows.append(f"- Vendor: {r['vendor_name']} | Date: {r['transaction_date']} | Amount: {r['gross_amount']} | Currency: {r['currency']} | Category: {r['ledger_category']} | Verified: {r['is_verified']}")
+    context = f"Current ledger entries ({len(rows)} total):\n" + "\n".join(rows)
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": MODEL,
+        "messages": [
+            {"role": "system", "content": AI_QUERY_SYSTEM_PROMPT.format(data_context=context)},
+            {"role": "user", "content": question}
+        ]
+    }
+    try:
+        resp = requests.post(API_URL, headers=headers, json=payload, timeout=60)
+        resp.raise_for_status()
+        return resp.json()["choices"][0]["message"]["content"]
+    except requests.RequestException as e:
+        return f"API request failed: {e}"
 
 # ── Validation Layer ──
 
@@ -434,6 +497,39 @@ if dup:
         st.rerun()
     st.stop()
 
+# ── AI Assistant ──
+
+def show_ai_panel():
+    st.markdown("""<style>
+    .block-container{max-width:100% !important;padding:1rem 2rem !important;}
+    header{display:none !important;}
+    </style>""", unsafe_allow_html=True)
+    col1, col2 = st.columns([8, 1])
+    with col1:
+        st.title("🤖 AI Assistant")
+    with col2:
+        if st.button("✕", key="ai_close"):
+            st.session_state["ai_panel_open"] = False
+            st.rerun()
+    for msg in st.session_state.get("ai_messages", []):
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+    prompt = st.chat_input("Ask a question about your ledger records...")
+    if prompt:
+        st.session_state.setdefault("ai_messages", []).append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
+        with st.chat_message("assistant"):
+            with st.spinner("Analyzing your records..."):
+                response = query_ai(prompt)
+            st.markdown(response)
+        st.session_state["ai_messages"].append({"role": "assistant", "content": response})
+        st.rerun()
+
+if st.session_state.get("ai_panel_open"):
+    show_ai_panel()
+    st.stop()
+
 # ── Fuzzy Search & Split-Screen Layout ──
 
 df = load_entries(include_deleted=st.session_state.get("show_deleted", False))
@@ -572,3 +668,7 @@ with col2:
             st.rerun()
     else:
         st.info("No entries in ledger. Upload a document above.")
+
+st.markdown('<a href="?ai=1" class="ai-fab-btn" target="_self">🤖</a>', unsafe_allow_html=True)
+
+
