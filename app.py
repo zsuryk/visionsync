@@ -13,6 +13,14 @@ import pandas as pd
 # ── Page Configuration ──
 st.set_page_config(page_title="VisionSync | Document Ledger", layout="wide")
 
+st.markdown("""
+<style>
+div[data-testid="metric-container"]{border:1px solid #e0e0e0;border-radius:8px;padding:8px 16px;}
+div[data-testid="column"]:has(> div > section.main > div[data-testid="stFileUploader"] ){padding-top:12px;}
+div[data-testid="stHorizontalBlock"]:has(> div:nth-child(2):last-child){gap:32px;}
+</style>
+""", unsafe_allow_html=True)
+
 # ── Constants ──
 DB_PATH = "db.sqlite"
 API_URL = "https://model.service-inference.ai/v1/chat/completions"
@@ -219,64 +227,74 @@ if "db_inited" not in st.session_state:
 
 st.title("VisionSync")
 st.caption("Source-Linked Document-to-Books Pipeline — Vision Co Challenge")
-st.divider()
 
-# ── File Upload & Processing ──
+# ── Metrics Row ──
 
-uploaded_file = st.file_uploader("Upload a financial document", type=["png", "jpg", "jpeg", "pdf"])
+df_meta = load_entries(include_deleted=True)
+total_all = len(df_meta)
+verified_all = int(df_meta["is_verified"].sum()) if not df_meta.empty else 0
+m1, m2, m3, m4 = st.columns(4)
+m1.metric("Total Entries", total_all)
+m2.metric("Verified", f"{verified_all} / {total_all}" if total_all else "0")
+m3.metric("Pending Review", total_all - verified_all)
+m4.metric("Unverified", total_all - verified_all)
 
-if uploaded_file is not None:
-    file_key = f"{uploaded_file.name}_{uploaded_file.size}"
-    processed_key = st.session_state.get("processed_key")
+# ── Sidebar: Upload & Processing ──
 
-    if processed_key != file_key:
-        st.session_state["processed_key"] = file_key
-        raw_bytes = uploaded_file.getvalue()
-        is_pdf = uploaded_file.name.lower().endswith(".pdf")
+with st.sidebar:
+    st.header("Upload Document")
+    upload_key = f"upload_{st.session_state.get('upload_counter', 0)}"
+    uploaded_file = st.file_uploader(
+        "Upload a financial document", type=["png", "jpg", "jpeg", "pdf"],
+        label_visibility="collapsed", key=upload_key
+    )
 
-        if is_pdf:
-            pages = pdf_to_images(raw_bytes)
-            st.session_state["current_pdf_pages"] = pages
-            b64_image = encode_image(pages[0])
-            img_format = "png"
-        else:
-            b64_image = encode_image(raw_bytes)
-            img_format = "jpeg"
+    if uploaded_file is not None:
+        file_key = f"{uploaded_file.name}_{uploaded_file.size}"
+        processed_key = st.session_state.get("processed_key")
 
-        with st.spinner("Extracting ledger data via Multimodal LLM..."):
-            result = call_llm(b64_image, img_format)
-        if result:
-            for severity, msg in validate_extraction(result):
-                getattr(st, severity)(msg)
-            entry_id = insert_entry(
-                file_path=b64_image,
-                vendor_name=result.get("vendor_name", ""),
-                transaction_date=result.get("transaction_date", ""),
-                gross_amount=result.get("gross_amount", 0.0),
-                currency=result.get("currency", ""),
-                ledger_category=result.get("ledger_category", "")
-            )
+        if processed_key != file_key:
+            st.session_state.pop("last_warnings", None)
+            st.session_state["processed_key"] = file_key
+            raw_bytes = uploaded_file.getvalue()
+            is_pdf = uploaded_file.name.lower().endswith(".pdf")
+
             if is_pdf:
-                st.session_state.setdefault("pdf_pages", {})[entry_id] = pages
-            st.session_state["last_entry_id"] = entry_id
-            st.success("Entry extracted and saved to ledger!")
-            st.rerun()
+                pages = pdf_to_images(raw_bytes)
+                st.session_state["current_pdf_pages"] = pages
+                b64_image = encode_image(pages[0])
+                img_format = "png"
+            else:
+                b64_image = encode_image(raw_bytes)
+                img_format = "jpeg"
 
-st.divider()
-
-# ── Filters ──
-
-show_deleted = st.checkbox("Show deleted records", key="show_deleted")
-
-# ── Search ──
-
-query = st.text_input("🔍 Search entries", placeholder="vendor, date, currency, category...")
+            with st.spinner("Extracting ledger data via Multimodal LLM..."):
+                result = call_llm(b64_image, img_format)
+            if result:
+                warnings = validate_extraction(result)
+                st.session_state["last_warnings"] = warnings
+                for severity, msg in warnings:
+                    getattr(st, severity)(msg)
+                entry_id = insert_entry(
+                    file_path=b64_image,
+                    vendor_name=result.get("vendor_name", ""),
+                    transaction_date=result.get("transaction_date", ""),
+                    gross_amount=result.get("gross_amount", 0.0),
+                    currency=result.get("currency", ""),
+                    ledger_category=result.get("ledger_category", "")
+                )
+                if is_pdf:
+                    st.session_state.setdefault("pdf_pages", {})[entry_id] = pages
+                st.session_state["last_entry_id"] = entry_id
+                st.session_state["select_last_entry"] = True
+                st.session_state["upload_counter"] = st.session_state.get("upload_counter", 0) + 1
+                st.success("Entry extracted and saved to ledger!")
+                st.rerun()
 
 # ── Fuzzy Search & Split-Screen Layout ──
 
-df = load_entries(include_deleted=show_deleted)
-
-query_stripped = query.strip().lower()
+df = load_entries(include_deleted=st.session_state.get("show_deleted", False))
+query_stripped = st.session_state.get("search_input", "").strip().lower()
 if query_stripped and not df.empty:
     scores = []
     for _, row in df.iterrows():
@@ -312,8 +330,9 @@ with col1:
         }
 
         if entry_options:
-            if "last_entry_id" in st.session_state and not query_stripped:
-                st.session_state["entry_selector"] = st.session_state["last_entry_id"]
+            if st.session_state.pop("select_last_entry", False) and "last_entry_id" in st.session_state:
+                if st.session_state["last_entry_id"] in entry_options:
+                    st.session_state["entry_selector"] = st.session_state["last_entry_id"]
 
             selected_id = st.selectbox(
                 "Select entry to audit",
@@ -333,13 +352,13 @@ with col1:
                         idx = st.session_state[page_idx_key]
                         st.image(pdf_pages[idx], use_container_width=True)
                         if len(pdf_pages) > 1:
-                            pcol1, pcol2, pcol3 = st.columns([1, 2, 1])
+                            pcol1, pcol2, pcol3 = st.columns(3)
                             with pcol1:
                                 if st.button("◀", key=f"pprev_{selected_id}") and idx > 0:
                                     st.session_state[page_idx_key] = idx - 1
                                     st.rerun()
                             with pcol2:
-                                st.caption(f"Page {idx + 1} / {len(pdf_pages)}")
+                                st.markdown(f"<p style='text-align:center;margin:8px 0'><strong>Page {idx + 1} / {len(pdf_pages)}</strong></p>", unsafe_allow_html=True)
                             with pcol3:
                                 if st.button("▶", key=f"pnext_{selected_id}") and idx < len(pdf_pages) - 1:
                                     st.session_state[page_idx_key] = idx + 1
@@ -362,6 +381,20 @@ with col1:
 # ── RIGHT COLUMN: Interactive Validation Matrix ──
 
 with col2:
+    st.subheader("Search")
+    search_col, clear_col, toggle_col = st.columns([3, 0.5, 1.5])
+    with search_col:
+        st.text_input("🔍 Search", placeholder="vendor, date, currency, category...", label_visibility="collapsed", key="search_input")
+    with clear_col:
+        if st.button("✕", help="Clear search"):
+            st.session_state["search_input"] = ""
+            st.rerun()
+    with toggle_col:
+        st.checkbox("Show deleted", key="show_deleted")
+
+    for severity, msg in st.session_state.get("last_warnings", []):
+        getattr(st, severity)(msg)
+
     st.subheader("Interactive Validation Matrix")
     if not top_k_df.empty:
         display_cols = [
