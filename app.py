@@ -4,6 +4,7 @@ import uuid
 import json
 import base64
 import re
+import fitz
 import requests
 import pandas as pd
 
@@ -93,7 +94,17 @@ def update_entries(df):
 def encode_image(file_bytes):
     return base64.b64encode(file_bytes).decode("utf-8")
 
-def call_llm(b64_image):
+def pdf_to_images(pdf_bytes, scale=2.0):
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    pages = []
+    for page in doc:
+        mat = fitz.Matrix(scale, scale)
+        pix = page.get_pixmap(matrix=mat)
+        pages.append(pix.tobytes("png"))
+    doc.close()
+    return pages
+
+def call_llm(b64_image, image_format="jpeg"):
     api_key = st.secrets.get("INFERENCE_AI_API_KEY")
     if not api_key:
         st.error("API key not configured. Add INFERENCE_AI_API_KEY to .streamlit/secrets.toml")
@@ -116,7 +127,7 @@ def call_llm(b64_image):
                     {
                         "type": "image_url",
                         "image_url": {
-                            "url": f"data:image/jpeg;base64,{b64_image}"
+                            "url": f"data:image/{image_format};base64,{b64_image}"
                         }
                     }
                 ]
@@ -153,7 +164,7 @@ st.divider()
 
 # ── File Upload & Processing ──
 
-uploaded_file = st.file_uploader("Upload a financial document", type=["png", "jpg", "jpeg"])
+uploaded_file = st.file_uploader("Upload a financial document", type=["png", "jpg", "jpeg", "pdf"])
 
 if uploaded_file is not None:
     file_key = f"{uploaded_file.name}_{uploaded_file.size}"
@@ -161,9 +172,20 @@ if uploaded_file is not None:
 
     if processed_key != file_key:
         st.session_state["processed_key"] = file_key
-        b64_image = encode_image(uploaded_file.getvalue())
+        raw_bytes = uploaded_file.getvalue()
+        is_pdf = uploaded_file.name.lower().endswith(".pdf")
+
+        if is_pdf:
+            pages = pdf_to_images(raw_bytes)
+            st.session_state["current_pdf_pages"] = pages
+            b64_image = encode_image(pages[0])
+            img_format = "png"
+        else:
+            b64_image = encode_image(raw_bytes)
+            img_format = "jpeg"
+
         with st.spinner("Extracting ledger data via Multimodal LLM..."):
-            result = call_llm(b64_image)
+            result = call_llm(b64_image, img_format)
         if result:
             entry_id = insert_entry(
                 file_path=b64_image,
@@ -173,6 +195,8 @@ if uploaded_file is not None:
                 currency=result.get("currency", ""),
                 ledger_category=result.get("ledger_category", "")
             )
+            if is_pdf:
+                st.session_state.setdefault("pdf_pages", {})[entry_id] = pages
             st.session_state["last_entry_id"] = entry_id
             st.success("Entry extracted and saved to ledger!")
             st.rerun()
@@ -207,7 +231,27 @@ with col1:
         if selected_id:
             row = df[df["id"] == selected_id].iloc[0]
             try:
-                st.image(base64.b64decode(row["file_path"]), use_container_width=True)
+                pdf_pages = st.session_state.get("pdf_pages", {}).get(selected_id)
+                if pdf_pages:
+                    page_idx_key = f"pdf_page_{selected_id}"
+                    if page_idx_key not in st.session_state:
+                        st.session_state[page_idx_key] = 0
+                    idx = st.session_state[page_idx_key]
+                    st.image(pdf_pages[idx], use_container_width=True)
+                    if len(pdf_pages) > 1:
+                        pcol1, pcol2, pcol3 = st.columns([1, 2, 1])
+                        with pcol1:
+                            if st.button("◀", key=f"pprev_{selected_id}") and idx > 0:
+                                st.session_state[page_idx_key] = idx - 1
+                                st.rerun()
+                        with pcol2:
+                            st.caption(f"Page {idx + 1} / {len(pdf_pages)}")
+                        with pcol3:
+                            if st.button("▶", key=f"pnext_{selected_id}") and idx < len(pdf_pages) - 1:
+                                st.session_state[page_idx_key] = idx + 1
+                                st.rerun()
+                else:
+                    st.image(base64.b64decode(row["file_path"]), use_container_width=True)
             except Exception:
                 st.caption("Image data unavailable for this entry.")
     else:
