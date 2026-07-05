@@ -45,12 +45,20 @@ The system must automatically initialize `db.sqlite` on startup if it does not e
 * `currency`: string
 * `ledger_category`: string
 * `is_verified`: boolean (Default: False)
+* `is_deleted`: boolean (Default: False) — soft-delete flag; records are never physically removed
 
 ## 5. UI / UX Implementation Guidelines
 
 * **Audit Transparency (Critical)**: The UI must utilize Streamlit columns (`st.columns()`). When a parsed ledger entry is displayed or edited, the original uploaded image MUST be rendered directly adjacent to the data using `st.image()`.
 * **Interactive Data Grid**: Use `st.data_editor()` to display the SQLite records, allowing the user to manually correct any LLM hallucinations.
 * **Verification Hook**: Include a mechanism (like a checkbox column) to flip the `is_verified` boolean in the database, demonstrating the human-in-the-loop accounting workflow.
+
+### 5.5. Soft-Delete Convention
+
+* Records are never physically deleted from the database. The `is_deleted` column (boolean, default `False`) marks an entry as removed.
+* A **"🗑 Delete entry"** button appears beneath the source image in the Source Asset Vault column. Clicking it toggles `is_deleted` to `1` and hides the entry from the default view.
+* The **"Show deleted records"** checkbox above the search box reveals deleted entries (with a 🗑 label). When viewing a deleted entry, the button reads **"↩ Restore entry"** — clicking it flips `is_deleted` back to `0`.
+* The helper function `toggle_deleted(entry_id)` in `app.py` atomically flips the boolean using a `CASE WHEN` SQL statement.
 
 ## 6. Execution Commands
 

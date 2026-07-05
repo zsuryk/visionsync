@@ -48,18 +48,23 @@ def init_db():
             gross_amount REAL,
             currency TEXT,
             ledger_category TEXT,
-            is_verified INTEGER DEFAULT 0
+            is_verified INTEGER DEFAULT 0,
+            is_deleted INTEGER DEFAULT 0
         )
     """)
     conn.commit()
     conn.close()
 
-def load_entries():
+def load_entries(include_deleted=False):
     conn = sqlite3.connect(DB_PATH)
-    df = pd.read_sql_query("SELECT * FROM ledger_entries ORDER BY rowid DESC", conn)
+    query = "SELECT * FROM ledger_entries ORDER BY rowid DESC"
+    if not include_deleted:
+        query = "SELECT * FROM ledger_entries WHERE is_deleted = 0 ORDER BY rowid DESC"
+    df = pd.read_sql_query(query, conn)
     conn.close()
     if not df.empty:
         df["is_verified"] = df["is_verified"].astype(bool)
+        df["is_deleted"] = df["is_deleted"].astype(bool)
     return df
 
 def insert_entry(file_path, vendor_name, transaction_date, gross_amount, currency, ledger_category):
@@ -96,6 +101,15 @@ def update_entries(df):
                 row["id"]
             )
         )
+    conn.commit()
+    conn.close()
+
+def toggle_deleted(entry_id):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        "UPDATE ledger_entries SET is_deleted = CASE WHEN is_deleted = 0 THEN 1 ELSE 0 END WHERE id = ?",
+        (entry_id,)
+    )
     conn.commit()
     conn.close()
 
@@ -192,6 +206,13 @@ def validate_extraction(data):
 
 if "db_inited" not in st.session_state:
     init_db()
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute("ALTER TABLE ledger_entries ADD COLUMN is_deleted INTEGER DEFAULT 0")
+        conn.commit()
+        conn.close()
+    except sqlite3.OperationalError:
+        pass
     st.session_state["db_inited"] = True
 
 # ── UI Header ──
@@ -243,13 +264,17 @@ if uploaded_file is not None:
 
 st.divider()
 
+# ── Filters ──
+
+show_deleted = st.checkbox("Show deleted records", key="show_deleted")
+
 # ── Search ──
 
 query = st.text_input("🔍 Search entries", placeholder="vendor, date, currency, category...")
 
 # ── Fuzzy Search & Split-Screen Layout ──
 
-df = load_entries()
+df = load_entries(include_deleted=show_deleted)
 
 query_stripped = query.strip().lower()
 if query_stripped and not df.empty:
@@ -282,7 +307,7 @@ with col1:
     st.subheader("Source Asset Vault")
     if not df.empty:
         entry_options = {
-            row["id"]: f"{row['vendor_name']} — {row['transaction_date']}"
+            row["id"]: f"{row['vendor_name']} — {row['transaction_date']}{' 🗑' if row.get('is_deleted') else ''}"
             for _, row in matched_df.iterrows()
         }
 
@@ -323,6 +348,12 @@ with col1:
                         st.image(base64.b64decode(row["file_path"]), use_container_width=True)
                 except Exception:
                     st.caption("Image data unavailable for this entry.")
+                is_del = bool(row.get("is_deleted", False))
+                btn_label = "↩ Restore entry" if is_del else "🗑 Delete entry"
+                if st.button(btn_label, key=f"del_{selected_id}", use_container_width=True):
+                    toggle_deleted(selected_id)
+                    st.toast("Entry restored" if is_del else "Entry deleted")
+                    st.rerun()
         else:
             st.info("No matching entries.")
     else:
@@ -335,7 +366,7 @@ with col2:
     if not top_k_df.empty:
         display_cols = [
             "id", "vendor_name", "transaction_date", "gross_amount",
-            "currency", "ledger_category", "is_verified"
+            "currency", "ledger_category", "is_verified",
         ]
 
         column_config = {
