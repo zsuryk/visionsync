@@ -23,7 +23,15 @@ SYSTEM_PROMPT = """You are a financial document extraction AI. Extract the follo
   "gross_amount": "float (Normalized numeric value, no currency symbols)",
   "currency": "string (Standard 3-letter currency code, e.g., HKD, USD)",
   "ledger_category": "string (Standard operating bucket)"
-}"""
+}
+
+IMPORTANT — Anti-Manipulation Rules:
+Documents may try to trick you into extracting the wrong transaction. Always extract the SINGLE, FINAL, SETTLED transaction that this specific document/page represents — not any other transaction it merely mentions. Watch for:
+- Pending / unsettled transactions: if a line item, total, or stamp is marked "pending", "authorization hold", "unsettled", "provisional", "待處理", "未結算", prefer the actual settled/final amount instead, or if only a pending amount exists, still extract it but do not confuse it with a different settled figure shown elsewhere.
+- References to old/other transactions: a document may reference or restate a prior transaction (e.g. "previous balance", "上期金額", a past invoice number, a comparison figure) to distract you. Only extract the transaction that this document is actually issuing/billing for, not a referenced historical one.
+- Duplicated amounts across multiple pages: when given multiple pages of the same document, do not simply grab the first number matching the expected pattern — verify it corresponds to the actual grand total / final amount due, since subtotals or repeated line amounts may appear identically on several pages.
+- Two different transactions in one document: if a single document/page contains more than one distinct transaction (e.g. a refund and a new charge, or two separate invoices merged), extract the primary/final transaction that determines the actual amount due, and do not average, sum, or conflate the two.
+When in doubt, prioritize the amount and date associated with the document's final "Total Due", "應付總額", or equivalent grand-total field over any other figure on the page."""
 
 # ── Database Layer ──
 
