@@ -97,12 +97,9 @@ def init_db():
     conn.commit()
     conn.close()
 
-def load_entries(include_deleted=False):
+def load_entries():
     conn = sqlite3.connect(DB_PATH)
-    query = "SELECT * FROM ledger_entries ORDER BY rowid DESC"
-    if not include_deleted:
-        query = "SELECT * FROM ledger_entries WHERE is_deleted = 0 ORDER BY rowid DESC"
-    df = pd.read_sql_query(query, conn)
+    df = pd.read_sql_query("SELECT * FROM ledger_entries ORDER BY rowid DESC", conn)
     conn.close()
     if not df.empty:
         df["is_verified"] = df["is_verified"].astype(bool)
@@ -131,7 +128,8 @@ def update_entries(df):
                 gross_amount = ?,
                 currency = ?,
                 ledger_category = ?,
-                is_verified = ?
+                is_verified = ?,
+                is_deleted = ?
             WHERE id = ?""",
             (
                 row["vendor_name"],
@@ -140,18 +138,10 @@ def update_entries(df):
                 row["currency"],
                 row["ledger_category"],
                 int(row["is_verified"]),
+                int(row["is_deleted"]),
                 row["id"]
             )
         )
-    conn.commit()
-    conn.close()
-
-def toggle_deleted(entry_id):
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute(
-        "UPDATE ledger_entries SET is_deleted = CASE WHEN is_deleted = 0 THEN 1 ELSE 0 END WHERE id = ?",
-        (entry_id,)
-    )
     conn.commit()
     conn.close()
 
@@ -220,7 +210,7 @@ def query_ai(question):
     api_key = st.secrets.get("INFERENCE_AI_API_KEY")
     if not api_key:
         return "API key not configured. Add INFERENCE_AI_API_KEY to .streamlit/secrets.toml"
-    df = load_entries(include_deleted=False)
+    df = load_entries()
     if df.empty:
         return "The ledger is empty. Upload some documents first."
     rows = []
@@ -373,7 +363,7 @@ st.caption("Source-Linked Document-to-Books Pipeline — Vision Co Challenge")
 
 # ── Metrics Row ──
 
-df_meta = load_entries(include_deleted=True)
+df_meta = load_entries()
 total_all = len(df_meta)
 verified_all = int(df_meta["is_verified"].sum()) if not df_meta.empty else 0
 m1, m2, m3, m4 = st.columns(4)
@@ -425,7 +415,7 @@ with st.sidebar:
                     getattr(st, severity)(f"{new_file.name}: {msg}")
                 st.session_state["last_warnings"] = f_warnings
 
-                existing_df = load_entries(include_deleted=False)
+                existing_df = load_entries()
                 dups = find_duplicates(result, existing_df)
 
                 if dups:
@@ -532,7 +522,7 @@ if st.session_state.get("ai_panel_open"):
 
 # ── Fuzzy Search & Split-Screen Layout ──
 
-df = load_entries(include_deleted=st.session_state.get("show_deleted", False))
+df = load_entries()
 query_stripped = st.session_state.get("search_input", "").strip().lower()
 if query_stripped and not df.empty:
     scores = []
@@ -606,12 +596,6 @@ with col1:
                         st.image(base64.b64decode(row["file_path"]), use_container_width=True)
                 except Exception:
                     st.caption("Image data unavailable for this entry.")
-                is_del = bool(row.get("is_deleted", False))
-                btn_label = "↩ Restore entry" if is_del else "🗑 Delete entry"
-                if st.button(btn_label, key=f"del_{selected_id}", use_container_width=True):
-                    toggle_deleted(selected_id)
-                    st.toast("Entry restored" if is_del else "Entry deleted")
-                    st.rerun()
         else:
             st.info("No matching entries.")
     else:
@@ -621,15 +605,13 @@ with col1:
 
 with col2:
     st.subheader("Search")
-    search_col, clear_col, toggle_col = st.columns([3, 0.5, 1.5])
+    search_col, clear_col = st.columns([3, 0.5])
     with search_col:
         st.text_input("🔍 Search", placeholder="vendor, date, currency, category...", label_visibility="collapsed", key="search_input")
     with clear_col:
         if st.button("✕", help="Clear search"):
             st.session_state["search_input"] = ""
             st.rerun()
-    with toggle_col:
-        st.checkbox("Show deleted", key="show_deleted")
 
     for severity, msg in st.session_state.get("last_warnings", []):
         getattr(st, severity)(msg)
@@ -638,7 +620,7 @@ with col2:
     if not top_k_df.empty:
         display_cols = [
             "id", "vendor_name", "transaction_date", "gross_amount",
-            "currency", "ledger_category", "is_verified",
+            "currency", "ledger_category", "is_verified", "is_deleted",
         ]
 
         column_config = {
@@ -649,6 +631,7 @@ with col2:
             "currency": st.column_config.SelectboxColumn("Currency", options=["HKD", "USD", "CNY", "EUR", "GBP", "SGD", "TWD"]),
             "ledger_category": st.column_config.TextColumn("Category"),
             "is_verified": st.column_config.CheckboxColumn("Verified"),
+            "is_deleted": st.column_config.CheckboxColumn("Deleted"),
         }
 
         edited_df = st.data_editor(
