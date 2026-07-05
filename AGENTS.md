@@ -9,7 +9,7 @@
 ## 2. Technology Stack
 - **Framework**: Streamlit (Python)
 - **Database**: SQLite (Local file `db.sqlite`)
-- **LLM Engine**: Multimodal Vision LLM (`gpt-4o-mini` or `gpt-4o`) via Tokenmart Inference API.
+- **LLM Engine**: Multimodal Vision LLM via Tokenmart Inference API.
 - **Dependency Management**: `uv`
 
 ## 3. Architectural Rules & Constraints
@@ -56,7 +56,7 @@ The system must automatically initialize `db.sqlite` on startup if it does not e
 
 When asked to build, run, or test, assume the following environment commands:
 
-* **Run**: `uv streamlit run app.py`
+* **Run**: `uv run streamlit run app.py`
 
 ## 7. AI Agent Directives
 
