@@ -1,5 +1,10 @@
 # VisionSync — Document-to-Books Pipeline
 
+> ### ⚠️ Project Status: Archived (Hackathon Prototype)
+> **This repository is a proof-of-concept developed in 5 hours for the SeaHack 2026 hackathon and is now archived.** It is **not production-ready**, features an ephemeral local storage state, and contains mock configurations tailored specifically for judging evaluation. 
+
+---
+
 **Drop in messy receipts. Get clean ledger entries. Source-linked, human-verified, AI-powered.**
 
 Built for **Vision Co** and every Hong Kong accounting firm drowning in paper — handles mixed Chinese/English, phone photos, PDF scans, and real-world document mess.
