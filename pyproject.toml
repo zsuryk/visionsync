@@ -9,4 +9,5 @@ dependencies = [
     "requests>=2.31",
     "pandas>=2.0",
     "PyMuPDF>=1.23",
+    "rapidfuzz>=3.0",
 ]

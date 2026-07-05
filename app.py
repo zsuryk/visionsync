@@ -6,6 +6,7 @@ import base64
 import re
 import fitz
 import requests
+from rapidfuzz import fuzz
 import pandas as pd
 
 # ── Page Configuration ──
@@ -211,9 +212,37 @@ if uploaded_file is not None:
 
 st.divider()
 
-# ── Main Split-Screen Layout ──
+# ── Search ──
+
+query = st.text_input("🔍 Search entries", placeholder="vendor, date, currency, category...")
+
+# ── Fuzzy Search & Split-Screen Layout ──
 
 df = load_entries()
+
+query_stripped = query.strip().lower()
+if query_stripped and not df.empty:
+    scores = []
+    for _, row in df.iterrows():
+        fields = [
+            str(row.get("vendor_name", "")),
+            str(row.get("transaction_date", "")),
+            str(row.get("currency", "")),
+            str(row.get("ledger_category", "")),
+        ]
+        best = max(fuzz.partial_ratio(query_stripped, f.lower()) for f in fields)
+        scores.append(best)
+    df_scores = df.copy()
+    df_scores["_score"] = scores
+    matched_df = df_scores[df_scores["_score"] >= 50].sort_values("_score", ascending=False)
+    top_k_df = matched_df.head(10)
+    if not matched_df.empty:
+        st.session_state["entry_selector"] = matched_df.iloc[0]["id"]
+    st.caption(f"Showing {len(top_k_df)} of {len(df)} entries (score ≥ 50)")
+else:
+    matched_df = df
+    top_k_df = df.head(10)
+
 col1, col2 = st.columns([1, 1.5])
 
 # ── LEFT COLUMN: Source Asset Vault ──
@@ -223,45 +252,48 @@ with col1:
     if not df.empty:
         entry_options = {
             row["id"]: f"{row['vendor_name']} — {row['transaction_date']}"
-            for _, row in df.iterrows()
+            for _, row in matched_df.iterrows()
         }
-        selector_key = "entry_selector"
-        if "last_entry_id" in st.session_state:
-            st.session_state[selector_key] = st.session_state["last_entry_id"]
 
-        selected_id = st.selectbox(
-            "Select entry to audit",
-            options=list(entry_options.keys()),
-            format_func=lambda x: entry_options[x],
-            key=selector_key
-        )
+        if entry_options:
+            if "last_entry_id" in st.session_state and not query_stripped:
+                st.session_state["entry_selector"] = st.session_state["last_entry_id"]
 
-        if selected_id:
-            row = df[df["id"] == selected_id].iloc[0]
-            try:
-                pdf_pages = st.session_state.get("pdf_pages", {}).get(selected_id)
-                if pdf_pages:
-                    page_idx_key = f"pdf_page_{selected_id}"
-                    if page_idx_key not in st.session_state:
-                        st.session_state[page_idx_key] = 0
-                    idx = st.session_state[page_idx_key]
-                    st.image(pdf_pages[idx], use_container_width=True)
-                    if len(pdf_pages) > 1:
-                        pcol1, pcol2, pcol3 = st.columns([1, 2, 1])
-                        with pcol1:
-                            if st.button("◀", key=f"pprev_{selected_id}") and idx > 0:
-                                st.session_state[page_idx_key] = idx - 1
-                                st.rerun()
-                        with pcol2:
-                            st.caption(f"Page {idx + 1} / {len(pdf_pages)}")
-                        with pcol3:
-                            if st.button("▶", key=f"pnext_{selected_id}") and idx < len(pdf_pages) - 1:
-                                st.session_state[page_idx_key] = idx + 1
-                                st.rerun()
-                else:
-                    st.image(base64.b64decode(row["file_path"]), use_container_width=True)
-            except Exception:
-                st.caption("Image data unavailable for this entry.")
+            selected_id = st.selectbox(
+                "Select entry to audit",
+                options=list(entry_options.keys()),
+                format_func=lambda x: entry_options[x],
+                key="entry_selector"
+            )
+
+            if selected_id:
+                row = df[df["id"] == selected_id].iloc[0]
+                try:
+                    pdf_pages = st.session_state.get("pdf_pages", {}).get(selected_id)
+                    if pdf_pages:
+                        page_idx_key = f"pdf_page_{selected_id}"
+                        if page_idx_key not in st.session_state:
+                            st.session_state[page_idx_key] = 0
+                        idx = st.session_state[page_idx_key]
+                        st.image(pdf_pages[idx], use_container_width=True)
+                        if len(pdf_pages) > 1:
+                            pcol1, pcol2, pcol3 = st.columns([1, 2, 1])
+                            with pcol1:
+                                if st.button("◀", key=f"pprev_{selected_id}") and idx > 0:
+                                    st.session_state[page_idx_key] = idx - 1
+                                    st.rerun()
+                            with pcol2:
+                                st.caption(f"Page {idx + 1} / {len(pdf_pages)}")
+                            with pcol3:
+                                if st.button("▶", key=f"pnext_{selected_id}") and idx < len(pdf_pages) - 1:
+                                    st.session_state[page_idx_key] = idx + 1
+                                    st.rerun()
+                    else:
+                        st.image(base64.b64decode(row["file_path"]), use_container_width=True)
+                except Exception:
+                    st.caption("Image data unavailable for this entry.")
+        else:
+            st.info("No matching entries.")
     else:
         st.info("Upload a document to begin.")
 
@@ -269,7 +301,7 @@ with col1:
 
 with col2:
     st.subheader("Interactive Validation Matrix")
-    if not df.empty:
+    if not top_k_df.empty:
         display_cols = [
             "id", "vendor_name", "transaction_date", "gross_amount",
             "currency", "ledger_category", "is_verified"
@@ -286,7 +318,7 @@ with col2:
         }
 
         edited_df = st.data_editor(
-            df[display_cols],
+            top_k_df[display_cols],
             column_config=column_config,
             use_container_width=True,
             hide_index=True,
