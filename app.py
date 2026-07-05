@@ -242,54 +242,71 @@ m4.metric("Unverified", total_all - verified_all)
 # ── Sidebar: Upload & Processing ──
 
 with st.sidebar:
-    st.header("Upload Document")
+    st.header("Upload Documents")
     upload_key = f"upload_{st.session_state.get('upload_counter', 0)}"
-    uploaded_file = st.file_uploader(
-        "Upload a financial document", type=["png", "jpg", "jpeg", "pdf"],
-        label_visibility="collapsed", key=upload_key
+    uploaded_files = st.file_uploader(
+        "Upload financial documents", type=["png", "jpg", "jpeg", "pdf"],
+        label_visibility="collapsed", key=upload_key, accept_multiple_files=True
     )
 
-    if uploaded_file is not None:
-        file_key = f"{uploaded_file.name}_{uploaded_file.size}"
-        processed_key = st.session_state.get("processed_key")
+    if uploaded_files:
+        new_files = [
+            f for f in uploaded_files
+            if f"{f.name}_{f.size}" not in st.session_state.get("processed_keys", set())
+        ]
 
-        if processed_key != file_key:
+        if new_files:
+            st.session_state.setdefault("processed_keys", set())
             st.session_state.pop("last_warnings", None)
-            st.session_state["processed_key"] = file_key
-            raw_bytes = uploaded_file.getvalue()
-            is_pdf = uploaded_file.name.lower().endswith(".pdf")
+            all_warnings = []
+            last_entry_id = None
+            success_count = 0
 
-            if is_pdf:
-                pages = pdf_to_images(raw_bytes)
-                st.session_state["current_pdf_pages"] = pages
-                b64_image = encode_image(pages[0])
-                img_format = "png"
-            else:
-                b64_image = encode_image(raw_bytes)
-                img_format = "jpeg"
+            for f in new_files:
+                file_key = f"{f.name}_{f.size}"
+                raw_bytes = f.getvalue()
+                is_pdf = f.name.lower().endswith(".pdf")
 
-            with st.spinner("Extracting ledger data via Multimodal LLM..."):
-                result = call_llm(b64_image, img_format)
-            if result:
-                warnings = validate_extraction(result)
-                st.session_state["last_warnings"] = warnings
-                for severity, msg in warnings:
-                    getattr(st, severity)(msg)
-                entry_id = insert_entry(
-                    file_path=b64_image,
-                    vendor_name=result.get("vendor_name", ""),
-                    transaction_date=result.get("transaction_date", ""),
-                    gross_amount=result.get("gross_amount", 0.0),
-                    currency=result.get("currency", ""),
-                    ledger_category=result.get("ledger_category", "")
-                )
                 if is_pdf:
-                    st.session_state.setdefault("pdf_pages", {})[entry_id] = pages
-                st.session_state["last_entry_id"] = entry_id
+                    pages = pdf_to_images(raw_bytes)
+                    st.session_state["current_pdf_pages"] = pages
+                    b64_image = encode_image(pages[0])
+                    img_format = "png"
+                else:
+                    b64_image = encode_image(raw_bytes)
+                    img_format = "jpeg"
+
+                with st.spinner(f"Extracting {f.name}..."):
+                    result = call_llm(b64_image, img_format)
+                if result:
+                    f_warnings = validate_extraction(result)
+                    for severity, msg in f_warnings:
+                        getattr(st, severity)(f"{f.name}: {msg}")
+                    all_warnings.extend(f_warnings)
+
+                    entry_id = insert_entry(
+                        file_path=b64_image,
+                        vendor_name=result.get("vendor_name", ""),
+                        transaction_date=result.get("transaction_date", ""),
+                        gross_amount=result.get("gross_amount", 0.0),
+                        currency=result.get("currency", ""),
+                        ledger_category=result.get("ledger_category", "")
+                    )
+                    if is_pdf:
+                        st.session_state.setdefault("pdf_pages", {})[entry_id] = pages
+                    st.session_state["processed_keys"].add(file_key)
+                    last_entry_id = entry_id
+                    success_count += 1
+
+            if all_warnings:
+                st.session_state["last_warnings"] = all_warnings
+            if last_entry_id:
+                st.session_state["last_entry_id"] = last_entry_id
                 st.session_state["select_last_entry"] = True
-                st.session_state["upload_counter"] = st.session_state.get("upload_counter", 0) + 1
-                st.success("Entry extracted and saved to ledger!")
-                st.rerun()
+
+            st.session_state["upload_counter"] = st.session_state.get("upload_counter", 0) + 1
+            st.success(f"{success_count} entries extracted and saved to ledger!")
+            st.rerun()
 
 # ── Fuzzy Search & Split-Screen Layout ──
 

@@ -53,6 +53,13 @@ The system must automatically initialize `db.sqlite` on startup if it does not e
 * **Interactive Data Grid**: Use `st.data_editor()` to display the SQLite records, allowing the user to manually correct any LLM hallucinations.
 * **Verification Hook**: Include a mechanism (like a checkbox column) to flip the `is_verified` boolean in the database, demonstrating the human-in-the-loop accounting workflow.
 
+### 5.2. Multi-File Upload
+
+* The sidebar file uploader uses `accept_multiple_files=True` to allow batch uploads of images and PDFs.
+* Duplicate detection: `st.session_state["processed_keys"]` (a `set` of `"{name}_{size}"` strings) prevents re-processing the same file across reruns.
+* Each file in the batch is processed sequentially in a `for` loop; failed files (LLM returns `None`) are skipped silently.
+* Warnings from all files are aggregated into `st.session_state["last_warnings"]` and displayed with a `"filename: message"` prefix.
+
 ### 5.5. Soft-Delete Convention
 
 * Records are never physically deleted from the database. The `is_deleted` column (boolean, default `False`) marks an entry as removed.
